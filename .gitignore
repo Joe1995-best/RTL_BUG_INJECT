@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+output/
+*.vcd
+*.vpd
+*.fsdb
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo

@@ -1,0 +1,109 @@
+# IP 规范中间表 — spec-analyzer 产出
+# 第一道评审节点：协议识别、寄存器地址、feature 完整性
+
+module_name: i2c_controller
+version: 1.0
+
+interfaces:
+  - name: host_if
+    protocol: apb_slave
+    direction: slave
+    description: "APB slave 接口，用于寄存器配置"
+    signals:
+      - {name: paddr,   width: 12, direction: input}
+      - {name: pwrite,  width: 1,  direction: input}
+      - {name: pwdata,  width: 32, direction: input}
+      - {name: prdata,  width: 32, direction: output}
+      - {name: psel,    width: 1,  direction: input}
+      - {name: penable, width: 1,  direction: input}
+      - {name: pready,  width: 1,  direction: output}
+      - {name: pslverr, width: 1,  direction: output}
+
+  - name: i2c_bus
+    protocol: i2c
+    direction: master
+    description: "I2C master 总线接口"
+    signals:
+      - {name: scl, width: 1, direction: inout}
+      - {name: sda, width: 1, direction: inout}
+
+  - name: clk_rst
+    protocol: generic
+    description: "时钟和复位"
+    signals:
+      - {name: clk, width: 1, direction: input}
+      - {name: rst, width: 1, direction: input, polarity: active_low}
+
+registers:
+  - name: ctrl
+    offset: 0x00
+    size: 32
+    description: "控制寄存器"
+    fields:
+      - {name: enable,    bits: [0],   access: rw,  reset: 1}
+      - {name: speed_sel, bits: [2:1], access: rw,  reset: 0}
+      - {name: reserved,  bits: [31:3],access: ro,  reset: 0}
+
+  - name: status
+    offset: 0x04
+    size: 32
+    description: "状态寄存器"
+    fields:
+      - {name: busy, bits: [0], access: ro, reset: 0}
+      - {name: done, bits: [1], access: ro, reset: 0}
+      - {name: err,  bits: [2], access: w1c, reset: 0}
+
+  - name: tx_data
+    offset: 0x08
+    size: 32
+    description: "发送数据寄存器"
+    fields:
+      - {name: data, bits: [31:0], access: wo, reset: x}
+
+  - name: rx_data
+    offset: 0x0C
+    size: 32
+    description: "接收数据寄存器"
+    fields:
+      - {name: data, bits: [31:0], access: ro, reset: 0}
+
+  - name: clk_div
+    offset: 0x10
+    size: 32
+    description: "时钟分频寄存器"
+    fields:
+      - {name: divisor, bits: [15:0], access: rw, reset: 0x0064}
+      - {name: reserved, bits: [31:16], access: ro, reset: 0}
+
+features:
+  - name: reg_rw
+    description: "寄存器读写功能"
+    category: register
+
+  - name: i2c_write
+    description: "I2C master 发送数据"
+    category: protocol
+
+  - name: i2c_read
+    description: "I2C master 接收数据"
+    category: protocol
+
+  - name: i2c_speed
+    description: "I2C 速度模式切换 (standard/fast/fast+)"
+    category: protocol
+
+  - name: i2c_arbitration
+    description: "I2C 多主仲裁"
+    category: protocol
+
+  - name: i2c_clock_stretch
+    description: "I2C 从机时钟拉伸处理"
+    category: protocol
+
+  - name: intr_handling
+    description: "中断产生与清除"
+    category: interrupt
+
+  - name: error_recovery
+    description: "总线错误检测与恢复"
+    category: error
