@@ -1,16 +1,40 @@
 #!/usr/bin/env python3
-"""batch_challenger.py - Multi-Bug Batch Injection Challenge System
+"""
+batch_challenger.py — RTL Mutation Testing: Dual-Mode Evaluation System
 
-CORE: Inject multiple bugs into one RTL. Verifier runs simulations,
-finds bugs across multiple rounds. Score based on bug difficulty points.
-Tier: S(夯) A(强) B(中) C(弱) D(拉)
+TWO MODES
+=========
+
+1. CHALLENGE Mode (Manual / Interactive)
+   Inject multiple bugs into one RTL simultaneously. Verifier runs simulations,
+   debugs, and submits found bug IDs across multiple rounds.
+   Score = sum(found_points) / sum(all_points) x 100%
+
+   python engines/batch_challenger.py create --rtl rtl.sv --bugs 8 --out ch01/
+   python engines/batch_challenger.py view ch01/
+   python engines/batch_challenger.py submit ch01/ --found BUG-001,BUG-003
+   python engines/batch_challenger.py score ch01/
+
+2. AUTO Mode (Automated / Per-Mutant Simulation)
+   Generate mutants one-by-one, auto-run iverilog simulation against each.
+   Detect killed/alive automatically. Good for quick baseline evaluation.
+   Score = sum(killed_points) / sum(total_points) x 100%
+
+   python engines/batch_challenger.py auto --rtl rtl.sv --tb tb.sv --out eval/
+
+UNIFIED Tier System: S(夯 90-100%) / A(强 75-90%) / B(中 60-75%) / C(弱 40-60%) / D(拉 0-40%)
+
+LEADERBOARD
+  python engines/batch_challenger.py leaderboard --all ch01/ eval/ ch02/ --out report/
 """
 
 import argparse
 import json
 import os
 import random
+import subprocess
 import sys
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
@@ -80,7 +104,234 @@ def compute_tier(score_pct):
     return "D", "\u62c9", "#ef4444"
 
 # ===========================================================================
-# Challenge Engine
+# Auto Mode: Per-Mutant Simulation Evaluation
+# ===========================================================================
+
+def _run_sim(mutant_sv, tb_files, include_dirs, timeout=30.0, work_dir=None):
+    """Run iverilog + vvp simulation against one mutant RTL file."""
+    cmd = ["iverilog", "-o", "sim_out", "-g2005"]
+    for d in include_dirs:
+        cmd.extend(["-I", d])
+    cmd.append(mutant_sv)
+    cmd.extend(tb_files)
+
+    start = time.time()
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                timeout=timeout, cwd=work_dir or ".", shell=False)
+        duration = (time.time() - start) * 1000
+        if result.returncode == 0:
+            try:
+                run_result = subprocess.run(["vvp", "sim_out"], capture_output=True,
+                                            text=True, timeout=timeout, cwd=work_dir or ".", shell=False)
+                duration = (time.time() - start) * 1000
+                return run_result.returncode, (result.stderr or "") + "\n" + (run_result.stderr or ""), duration
+            except subprocess.TimeoutExpired:
+                return -2, "Simulation timeout", (time.time() - start) * 1000
+            except Exception as e:
+                return -3, str(e), (time.time() - start) * 1000
+        return result.returncode, result.stderr or "", duration
+    except subprocess.TimeoutExpired:
+        return -2, "Compilation timeout", (time.time() - start) * 1000
+    except Exception as e:
+        return -3, str(e), (time.time() - start) * 1000
+
+
+def _analyze_sim(exit_code, stderr):
+    """Analyze simulation result: killed / alive / error."""
+    stderr_lower = stderr.lower()
+    if exit_code != 0 and exit_code not in (-2, -3):
+        if any(kw in stderr_lower for kw in
+               ["syntax error", "undeclared", "unknown", "error", "fatal",
+                "width mismatch", "port mismatch"]):
+            return "killed", "compile_error"
+    if exit_code == 1:
+        if "assert" in stderr_lower:
+            return "killed", "assertion"
+        if "fatal" in stderr_lower or "error" in stderr_lower:
+            return "killed", "runtime_error"
+        if stderr.strip():
+            return "killed", "runtime_error"
+    if exit_code == -2:
+        return "alive", "timeout"
+    if exit_code == -3:
+        return "error", "process_error"
+    return "alive", "survived"
+
+
+class AutoEvaluator:
+    """
+    Auto Mode: Evaluate each mutant independently via iverilog simulation.
+    Generates a challenge-like directory with per-mutant results, compatible
+    with the unified leaderboard system.
+    """
+
+    def __init__(self, rtl_path, tb_path, include_dirs=None, sim_timeout=30.0):
+        self.rtl_path = Path(rtl_path).resolve()
+        self.tb_path = Path(tb_path).resolve()
+        self.include_dirs = include_dirs or []
+        self.sim_timeout = sim_timeout
+
+    def _collect_tb_files(self):
+        if self.tb_path.is_dir():
+            return [str(f) for f in sorted(self.tb_path.glob("**/*.sv")) +
+                    sorted(self.tb_path.glob("**/*.v"))]
+        return [str(self.tb_path)]
+
+    def run_eval(self, output_dir="", project_name="Auto-Eval",
+                 categories=None, max_per_op=3, seed=42):
+        """Run full auto evaluation pipeline. Returns challenge-compatible dict."""
+        mutator = RTLMutator(str(self.rtl_path))
+        mutants = mutator.generate(categories=categories, max_per_op=max_per_op, seed=seed)
+
+        if not mutants:
+            raise ValueError(f"No mutants generated from {self.rtl_path}")
+
+        if not output_dir:
+            output_dir = os.path.join("challenges",
+                                      f"auto_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{seed:04d}")
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+
+        work_dir = str(out / "_sim_tmp")
+        os.makedirs(work_dir, exist_ok=True)
+
+        tb_files = self._collect_tb_files()
+        bugs = []
+        total_time = 0.0
+
+        print(f"\n{'='*60}")
+        print(f"  AUTO MODE: {len(mutants)} mutants x {self.rtl_path.name}")
+        print(f"  Testbench: {self.tb_path}")
+        print(f"{'='*60}\n")
+
+        for idx, mf in enumerate(mutants):
+            spec = mf.spec
+            pts = POINTS.get(spec.operator, 50)
+            print(f"  [{idx+1}/{len(mutants)}] {spec.operator:<10} L{spec.line_no:<4} ", end="", flush=True)
+
+            mutant_path = os.path.join(work_dir, f"mut_{idx:03d}.sv")
+            with open(mutant_path, "w", encoding="utf-8") as f:
+                f.write(mf.content)
+
+            exit_code, stderr, duration = _run_sim(
+                mutant_sv=mutant_path, tb_files=tb_files,
+                include_dirs=self.include_dirs,
+                timeout=self.sim_timeout, work_dir=work_dir,
+            )
+            status, kill_method = _analyze_sim(exit_code, stderr)
+            total_time += duration
+
+            icon = {"killed": "X", "alive": "O", "error": "!"}.get(status, "?")
+            print(f"[{icon} {status:<10}] {kill_method}  ({duration:.0f}ms)")
+
+            bug = Bug(
+                bug_id=f"MUT-{idx+1:03d}",
+                operator=spec.operator,
+                category=spec.category,
+                level=spec.level,
+                points=pts,
+                severity=spec.severity,
+                description=spec.description,
+                line_no=spec.line_no,
+                original_text=spec.original_text,
+                mutated_text=spec.mutated_text,
+                source_file=str(self.rtl_path.name),
+                kill_hint=f"auto:{kill_method}",
+                status="found" if status == "killed" else "hidden",
+            )
+            bugs.append(bug)
+
+        # Compute scores
+        tp = sum(b.points for b in bugs)
+        ep = sum(b.points for b in bugs if b.status == "found")
+        sp = round(ep / tp * 100, 1) if tp > 0 else 0.0
+        tier, tl, tc = compute_tier(sp)
+        killed = sum(1 for b in bugs if b.status == "found")
+        alive = sum(1 for b in bugs if b.status == "hidden")
+        errors = sum(1 for b in bugs if b.kill_hint.startswith("auto:process"))
+
+        # Category breakdown
+        cat_data = defaultdict(lambda: {"t": 0, "f": 0, "pt": 0, "pf": 0})
+        for b in bugs:
+            c = b.category or "?"
+            cat_data[c]["t"] += 1; cat_data[c]["pt"] += b.points
+            if b.status == "found":
+                cat_data[c]["f"] += 1; cat_data[c]["pf"] += b.points
+        cat_labels = {"reg_bank": "Register Bank", "fsm": "FSM", "datapath": "Datapath",
+                      "interface": "Interface", "irq": "IRQ", "subsystem": "Subsystem"}
+        cat_scores = []
+        for cat, d in cat_data.items():
+            s = round(d["pf"] / d["pt"] * 100, 1) if d["pt"] > 0 else 0.0
+            cat_scores.append({
+                "category": cat, "label": cat_labels.get(cat, cat),
+                "total": d["t"], "found": d["f"],
+                "pts_total": d["pt"], "pts_earned": d["pf"],
+                "score": s, "tier": compute_tier(s)[0],
+            })
+
+        challenge_id = out.name
+        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Save as challenge-compatible answer.json
+        result_data = {
+            "challenge_id": challenge_id,
+            "mode": "auto",
+            "rtl_source": str(self.rtl_path),
+            "created_at": created_at,
+            "verifier_name": project_name,
+            "completed": True,
+            "score": sp,
+            "total_points": tp,
+            "earned_points": ep,
+            "tier": tier,
+            "tier_label": tl,
+            "tier_color": tc,
+            "total_mutants": len(mutants),
+            "killed": killed,
+            "alive": alive,
+            "errors": errors,
+            "sim_total_time_ms": round(total_time, 1),
+            "submissions": [],  # auto mode has no manual submissions
+            "bugs": [asdict(b) for b in bugs],
+            "category_scores": cat_scores,
+            "completed_at": created_at,
+        }
+
+        with open(out / "answer.json", "w", encoding="utf-8") as f:
+            json.dump(result_data, f, indent=2, ensure_ascii=False, default=str)
+
+        # Save task.json for consistency
+        task_data = {
+            "challenge_id": challenge_id,
+            "mode": "auto",
+            "created_at": created_at,
+            "verifier_name": project_name,
+            "rtl_file": str(self.rtl_path),
+            "total_bugs": len(bugs),
+            "total_points": tp,
+            "bug_list": [{
+                "bug_id": b.bug_id, "operator": b.operator, "category": b.category,
+                "points": b.points, "severity": b.severity, "description": b.description,
+                "line_no": b.line_no,
+                "original_text_hint": (b.original_text[:60] + "...") if len(b.original_text) > 60 else b.original_text,
+            } for b in bugs],
+        }
+        with open(out / "task.json", "w", encoding="utf-8") as f:
+            json.dump(task_data, f, indent=2, ensure_ascii=False)
+
+        print(f"\n{'='*60}")
+        print(f"  AUTO RESULT: {challenge_id}")
+        print(f"  Score: {sp}%  |  Tier {tier} ({tl})")
+        print(f"  Killed: {killed}/{len(mutants)}  |  Points: {ep}/{tp}")
+        print(f"  Sim time: {total_time:.0f}ms  |  Output: {out}")
+        print(f"{'='*60}\n")
+
+        return result_data
+
+
+# ===========================================================================
+# Challenge Engine (Manual / Interactive Mode)
 # ===========================================================================
 
 class BatchChallenger:
@@ -361,11 +612,14 @@ class BatchChallenger:
         """Display challenge info."""
         tp = Path(challenge_dir) / "task.json"
         ap = Path(challenge_dir) / "answer.json"
+        mode_str = ""
         if tp.exists():
             t = json.load(open(tp, "r", encoding="utf-8"))
+            mode_str = f"  Mode:      {t.get('mode', 'challenge').upper()}"
             print(f"\n  Challenge: {t['challenge_id']}  "
                   f"|  Bugs: {t['total_bugs']}  |  Points: {t['total_points']}")
             print(f"  Verifier:  {t['verifier_name']}  |  RTL: {t['rtl_file']}")
+            print(mode_str)
             print()
             for b in t["bug_list"]:
                 print(f"  {b['bug_id']}  {b['operator']:<10} {b['points']:>3}pts  "
@@ -373,7 +627,11 @@ class BatchChallenger:
         if show_answers and ap.exists():
             a = json.load(open(ap, "r", encoding="utf-8"))
             if a.get("completed"):
-                print(f"\n  FINAL: {a['score']}% Tier {a['tier']} ({a['tier_label']})")
+                mode_tag = f" ({a.get('mode', 'challenge')} mode)"
+                print(f"\n  FINAL{mode_tag}: {a['score']}% Tier {a['tier']} ({a['tier_label']})")
+                if a.get("killed") is not None:
+                    print(f"  Killed: {a.get('killed', '?')}/{a.get('total_mutants', '?')}  "
+                          f"|  Sim time: {a.get('sim_total_time_ms', '?')}ms")
 
 
 # ===========================================================================
@@ -456,12 +714,15 @@ def _build_html(results, title):
         tp = r.get("total_points", 0)
         rds = len(r.get("submissions", []))
         done = r.get("completed", False)
+        mode = r.get("mode", "challenge")
+        mode_tag = f'<span style="font-size:11px;color:#3b82f6;background:rgba(59,130,246,0.1);padding:1px 6px;border-radius:4px">{mode.upper()}</span>'
         st = '<span style="color:#10b981">Done</span>' if done else \
              '<span style="color:#f59e0b">In Progress</span>'
         bw = min(100, s)
         chr_rows += f"""<tr>
           <td style="text-align:center;font-weight:bold;color:#666">{rank}</td>
           <td><code>{r.get('challenge_id','?')[:20]}</code></td>
+          <td>{mode_tag}</td>
           <td>{r.get('verifier_name','anonymous')}</td>
           <td>{r.get('created_at','')[:16]}</td>
           <td>{fd}/{tot}</td><td>{ep}/{tp} pts</td><td>{rds}</td>
@@ -627,7 +888,7 @@ tr:hover{{background:rgba(255,255,255,0.03)}}
 
 <div class="header">
   <h1>{title}</h1>
-  <div class="subtitle">Multi-Bug Batch Injection Challenge</div>
+  <div class="subtitle">Dual-Mode: Challenge (Manual) + Auto (Simulation)</div>
 </div>
 
 <div class="section">
@@ -655,7 +916,7 @@ tr:hover{{background:rgba(255,255,255,0.03)}}
 </div>
 
 <div class="section"><h2>Challenge Results</h2>
-  <table><thead><tr><th>#</th><th>Challenge</th><th>Verifier</th><th>Date</th>
+  <table><thead><tr><th>#</th><th>Challenge</th><th>Mode</th><th>Verifier</th><th>Date</th>
     <th>Found</th><th>Points</th><th>Rounds</th><th>Score</th><th>Tier</th><th>Status</th>
     </tr></thead><tbody>{chr_rows}</tbody></table></div>
 
@@ -678,7 +939,7 @@ tr:hover{{background:rgba(255,255,255,0.03)}}
 {missed_html}
 
 <div style="text-align:center;color:#475569;font-size:12px;padding:16px">
-  RTL Mutation Testing - Multi-Bug Batch Challenge &bull; {now_str}
+  RTL Mutation Testing - Dual-Mode Evaluation System &bull; {now_str}
 </div>
 </div>
 <script>
@@ -702,49 +963,113 @@ document.querySelectorAll('.score-ring').forEach(el=>{{
 # ===========================================================================
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="RTL Multi-Bug Batch Challenge")
+    ap = argparse.ArgumentParser(
+        description="RTL Mutation Testing - Dual-Mode Evaluation System",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+MODES:
+  CHALLENGE (manual)  Inject N bugs into RTL, verifier finds them across sim rounds
+  AUTO (automated)    Per-mutant simulation via iverilog, auto-detect killed/alive
+
+COMMANDS:
+  auto         Run automated per-mutant evaluation (iverilog simulation)
+  create       Inject N bugs into RTL, create a challenge (manual mode)
+  view         View challenge/auto-eval info (optionally with answers)
+  submit       Submit found bug IDs (challenge mode only)
+  score        Final scoring and tier assignment (challenge mode only)
+  leaderboard  Generate HTML leaderboard from multiple challenges/auto-evals
+
+EXAMPLES:
+  # Auto mode - quick automated evaluation
+  python engines/batch_challenger.py auto --rtl rtl.sv --tb tb.sv --out eval/
+
+  # Challenge mode - manual multi-round debug
+  python engines/batch_challenger.py create --rtl rtl.sv --bugs 8 --out ch01/
+  python engines/batch_challenger.py submit ch01/ --found BUG-001,BUG-003,BUG-005
+  python engines/batch_challenger.py score ch01/
+
+  # Unified leaderboard (mix auto + challenge results)
+  python engines/batch_challenger.py leaderboard --all eval/ ch01/ ch02/ --out report/
+        """
+    )
     sub = ap.add_subparsers(dest="cmd")
 
-    pc = sub.add_parser("create")
+    # --- auto ---
+    pa = sub.add_parser("auto", help="Automated per-mutant evaluation via iverilog")
+    pa.add_argument("--rtl", required=True, help="RTL source file or directory")
+    pa.add_argument("--tb", required=True, help="Testbench file or directory")
+    pa.add_argument("--include", default="", help="Include directories (comma-separated)")
+    pa.add_argument("--out", default="", help="Output directory")
+    pa.add_argument("--name", default="Auto-Eval", help="Project/verifier name")
+    pa.add_argument("--max-per-op", type=int, default=3, help="Max mutants per operator")
+    pa.add_argument("--timeout", type=float, default=30.0, help="Sim timeout per mutant (seconds)")
+    pa.add_argument("--seed", type=int, default=42)
+
+    # --- create ---
+    pc = sub.add_parser("create", help="Create a new challenge (manual mode)")
     pc.add_argument("--rtl", required=True)
     pc.add_argument("--bugs", type=int, default=8)
     pc.add_argument("--out", default="")
+    pc.add_argument("--category", default="all")
+    pc.add_argument("--exclude", default="")
     pc.add_argument("--seed", type=int, default=42)
     pc.add_argument("--id", default="")
     pc.add_argument("--verifier", default="anonymous")
 
-    pv = sub.add_parser("view")
+    # --- view ---
+    pv = sub.add_parser("view", help="View challenge or auto-eval result")
     pv.add_argument("dir")
     pv.add_argument("--answers", action="store_true")
 
-    ps = sub.add_parser("submit")
+    # --- submit ---
+    ps = sub.add_parser("submit", help="Submit found bugs (challenge mode)")
     ps.add_argument("dir")
     ps.add_argument("--found", required=True)
     ps.add_argument("--round", type=int, default=None)
 
-    pp = sub.add_parser("score")
+    # --- score ---
+    pp = sub.add_parser("score", help="Score the challenge (challenge mode)")
     pp.add_argument("dir")
 
-    pl = sub.add_parser("leaderboard")
+    # --- leaderboard ---
+    pl = sub.add_parser("leaderboard", help="Generate unified leaderboard")
     pl.add_argument("--all", nargs="+", required=True)
     pl.add_argument("--out", default="output/leaderboard")
+    pl.add_argument("--title", default="RTL Mutation Testing Leaderboard")
 
     args = ap.parse_args(argv)
     e = BatchChallenger()
 
-    if args.cmd == "create":
-        e.create_challenge(args.rtl, args.bugs, args.out, seed=args.seed,
+    if args.cmd == "auto":
+        inc_dirs = [x.strip() for x in args.include.split(",") if x.strip()] if args.include else []
+        evaluator = AutoEvaluator(args.rtl, args.tb, include_dirs=inc_dirs,
+                                  sim_timeout=args.timeout)
+        evaluator.run_eval(output_dir=args.out, project_name=args.name,
+                           max_per_op=args.max_per_op, seed=args.seed)
+
+    elif args.cmd == "create":
+        cats = None
+        if args.category != "all":
+            cats = [MutCategory.from_str(c.strip()) for c in args.category.split(",")]
+        exclude = [x.strip() for x in args.exclude.split(",")] if args.exclude else None
+        e.create_challenge(args.rtl, args.bugs, args.out, categories=cats,
+                           exclude_ops=exclude, seed=args.seed,
                            challenge_id=args.id, verifier_name=args.verifier)
+
     elif args.cmd == "view":
         e.view_challenge(args.dir, show_answers=args.answers)
+
     elif args.cmd == "submit":
         ids = [x.strip() for x in args.found.split(",") if x.strip()]
         e.submit_found_bugs(args.dir, ids, args.round)
+
     elif args.cmd == "score":
         e.score_challenge(args.dir)
+
     elif args.cmd == "leaderboard":
-        hp = generate_leaderboard(args.all, args.out)
+        hp = generate_leaderboard(args.all, args.out, args.title)
         if hp: print(f"\nLeaderboard: {hp}")
+
     else:
         ap.print_help()
 
