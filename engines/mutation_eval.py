@@ -6,25 +6,28 @@ Evaluates AI verification flow detection capability by:
 1. Generating mutants from RTL
 2. Running iverilog simulation against each mutant
 3. Auto-detecting failures (assertions, $finish code, VCD signals)
-4. Scoring with weighted metrics
+4. Scoring with per-operator difficulty points
 5. Generating leaderboard HTML report with tier rankings
 
-Tier System:
+Tier System (based on weighted detection score):
   S  (90-100%) - Excellent: verification catches nearly all injected bugs
   A  (75-89%)  - Good: catches most bugs, minor gaps in coverage
   B  (60-74%)  - Acceptable: catches majority but misses several bug types
   C  (40-59%)  - Weak: significant detection gaps, needs improvement
   D  (0-39%)   - Poor: verification flow has critical blind spots
 
-Weight System:
-  - critical bugs have 3x weight (they're the most dangerous)
-  - high bugs have 2x weight
-  - medium bugs have 1x weight
-  - Category detection rate is measured independently
+Operator Point System:
+  Each operator has a unique difficulty score (0-100).
+  Higher points = harder bug to detect = more penalty if missed.
+  Score = sum(killed_points) / sum(total_points) x 100
+
+  Top difficulty operators:
+    RB-WE(100), SS-CONN(98), RB-ADDR(95), SS-BASE(94), FSM-RST(92)
+  Easiest operators:
+    DP-CONST(42), IF-IDLE(45), FSM-DEF(48)
 
 Usage:
     python engines/mutation_eval.py --rtl rtl/ --tb tb/ --out eval_report/
-    python engines/mutation_eval.py --manifest mutants/manifest.json --out eval_report/
     python engines/mutation_eval.py --demo               # Generate demo report
 """
 
@@ -41,15 +44,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-# Import the mutator engine
+# Import the mutator engine (includes POINTS dict with per-operator difficulty scores)
 sys.path.insert(0, str(Path(__file__).parent))
-from rtl_mutator import RTLMutator, MutCategory, MutantFile, MutantSpec
+from rtl_mutator import RTLMutator, MutCategory, MutantFile, MutantSpec, POINTS, _OPERATORS
 
-
-# ===========================================================================
-# Evaluation Data Structures
-# ===========================================================================
-
+# Severity weight is still used for severity-level breakdown display
 SEVERITY_WEIGHT = {"critical": 3.0, "high": 2.0, "medium": 1.0, "low": 0.5}
 
 TIER_TABLE = [
@@ -68,9 +67,10 @@ class MutantResult:
     operator: str
     category: str
     severity: str
-    description: str
-    original_text: str
-    mutated_text: str
+    points: int = 50              # operator difficulty score (from POINTS dict)
+    description: str = ""
+    original_text: str = ""
+    mutated_text: str = ""
     status: str = "alive"         # killed / alive / equivalent / error
     kill_method: str = ""         # assertion / scoreboard / vcd_check / crash / timeout
     sim_exit_code: int = -1
@@ -81,20 +81,20 @@ class MutantResult:
 
 @dataclass
 class CategoryScore:
-    """Per-category scoring."""
+    """Per-category scoring using operator points."""
     category: str
     label: str
     total: int = 0
     killed: int = 0
     alive: int = 0
     equivalent: int = 0
-    weighted_killed: float = 0.0
-    weighted_total: float = 0.0
+    pts_total: int = 0           # total possible points
+    pts_killed: int = 0          # points earned by killing mutants
     score: float = 0.0
 
     def compute(self):
-        denom = self.weighted_total
-        self.score = (self.weighted_killed / denom * 100) if denom > 0 else 0.0
+        denom = self.pts_total
+        self.score = (self.pts_killed / denom * 100) if denom > 0 else 0.0
 
 
 @dataclass
@@ -109,8 +109,8 @@ class EvalReport:
     alive: int = 0
     equivalent: int = 0
     error: int = 0
-    raw_score: float = 0.0        # unweighted
-    weighted_score: float = 0.0   # severity-weighted
+    raw_score: float = 0.0        # unweighted killed/total
+    score: float = 0.0            # points-weighted detection score
     tier: str = "D"
     tier_label: str = "Poor"
     tier_color: str = "#ef4444"
@@ -325,6 +325,7 @@ class MutationEvaluator:
                 operator=spec.operator,
                 category=spec.category,
                 severity=spec.severity,
+                points=POINTS.get(spec.operator, 50),
                 description=spec.description,
                 original_text=spec.original_text,
                 mutated_text=spec.mutated_text,
@@ -361,30 +362,38 @@ class MutationEvaluator:
         return report
 
     def _compute_scores(self, report: EvalReport):
-        """Compute all scoring metrics."""
+        """Compute all scoring metrics using per-operator difficulty points."""
         cat_data = defaultdict(lambda: {
             "total": 0, "killed": 0, "alive": 0, "equivalent": 0,
-            "weighted_killed": 0.0, "weighted_total": 0.0,
+            "pts_total": 0, "pts_killed": 0,
         })
         op_data = defaultdict(lambda: {
-            "total": 0, "killed": 0, "alive": 0,
+            "total": 0, "killed": 0, "alive": 0, "pts_total": 0, "pts_killed": 0,
         })
         sev_data = defaultdict(lambda: {
             "total": 0, "killed": 0, "alive": 0,
         })
 
         for r in self.results:
-            w = SEVERITY_WEIGHT.get(r.severity, 1.0)
+            pts = r.points  # operator difficulty score
 
+            # Category aggregation
             cat_data[r.category]["total"] += 1
             cat_data[r.category][r.status] = cat_data[r.category].get(r.status, 0) + 1
-            cat_data[r.category]["weighted_total"] += w
-            if r.status == "killed":
-                cat_data[r.category]["weighted_killed"] += w
+            if r.status not in ("equivalent", "error"):
+                cat_data[r.category]["pts_total"] += pts
+                if r.status == "killed":
+                    cat_data[r.category]["pts_killed"] += pts
 
+            # Operator aggregation
             op_data[r.operator]["total"] += 1
             op_data[r.operator][r.status] = op_data[r.operator].get(r.status, 0) + 1
+            if r.status not in ("equivalent", "error"):
+                op_data[r.operator]["pts_total"] += pts
+                if r.status == "killed":
+                    op_data[r.operator]["pts_killed"] += pts
 
+            # Severity aggregation (for display only, still uses severity weight)
             sev_data[r.severity]["total"] += 1
             sev_data[r.severity][r.status] = sev_data[r.severity].get(r.status, 0) + 1
 
@@ -405,8 +414,8 @@ class MutationEvaluator:
                 killed=d["killed"],
                 alive=d["alive"],
                 equivalent=d.get("equivalent", 0),
-                weighted_killed=d["weighted_killed"],
-                weighted_total=d["weighted_total"],
+                pts_total=d["pts_total"],
+                pts_killed=d["pts_killed"],
             )
             cs.compute()
             report.category_scores.append({
@@ -416,20 +425,29 @@ class MutationEvaluator:
                 "killed": cs.killed,
                 "alive": cs.alive,
                 "equivalent": cs.equivalent,
+                "pts_total": cs.pts_total,
+                "pts_killed": cs.pts_killed,
                 "score": round(cs.score, 1),
             })
 
-        # Operator scores
+        # Operator scores (sorted by points for leaderboard — high value = hard = top)
         for op, d in op_data.items():
-            effective = d["total"] - d.get("equivalent", 0)
-            score = (d["killed"] / effective * 100) if effective > 0 else 0.0
+            effective = d["total"] - d.get("equivalent", 0) - d.get("error", 0)
+            kill_rate = (d["killed"] / effective * 100) if effective > 0 else 0.0
+            pts_earned = d["pts_killed"]
+            pts_possible = d["pts_total"]
             report.operator_scores.append({
                 "operator": op,
                 "total": d["total"],
                 "killed": d["killed"],
                 "alive": d["alive"],
-                "score": round(score, 1),
+                "pts_earned": pts_earned,
+                "pts_possible": pts_possible,
+                "points": POINTS.get(op, 50),  # base difficulty of this operator
+                "score": round(kill_rate, 1),
             })
+        # Sort: by detection score ascending (weakest first = most concerning at top for "weakness view")
+        # But for leaderboard, we want strongest first (highest score). Keep both views in HTML.
         report.operator_scores.sort(key=lambda x: x["score"], reverse=True)
 
         # Severity scores
@@ -455,20 +473,19 @@ class MutationEvaluator:
         effective = len(self.results) - total_equiv - total_error
         report.raw_score = round(total_killed / max(1, effective) * 100, 1)
 
-        # Weighted score
-        total_w = 0.0
-        killed_w = 0.0
+        # Weighted score using operator difficulty points
+        total_pts = 0
+        killed_pts = 0
         for r in self.results:
             if r.status not in ("equivalent", "error"):
-                w = SEVERITY_WEIGHT.get(r.severity, 1.0)
-                total_w += w
+                total_pts += r.points
                 if r.status == "killed":
-                    killed_w += w
-        report.weighted_score = round(killed_w / max(0.01, total_w) * 100, 1)
+                    killed_pts += r.points
+        report.score = round(killed_pts / max(0.01, total_pts) * 100, 1)
 
-        # Assign tier based on weighted score
+        # Assign tier based on points-weighted score
         for tier_name, lo, hi, color, label, desc in TIER_TABLE:
-            if lo <= report.weighted_score <= hi:
+            if lo <= report.score <= hi:
                 report.tier = tier_name
                 report.tier_label = label
                 report.tier_color = color
@@ -481,6 +498,7 @@ class MutationEvaluator:
                 "operator": r.operator,
                 "category": r.category,
                 "severity": r.severity,
+                "points": r.points,
                 "description": r.description,
                 "original_text": r.original_text[:120],
                 "mutated_text": r.mutated_text[:120],
@@ -529,13 +547,13 @@ class MutationEvaluator:
             )
 
         # Overall recommendation
-        if report.weighted_score >= 90:
+        if report.score >= 90:
             recs.append("[OK] Verification flow is robust. Maintain current test quality.")
-        elif report.weighted_score >= 75:
+        elif report.score >= 75:
             recs.append("[OK] Good verification coverage. Focus on surviving mutants to reach S-tier.")
-        elif report.weighted_score >= 60:
+        elif report.score >= 60:
             recs.append("[ACTION] Add assertion-based checks and scoreboard comparisons for weak categories.")
-        elif report.weighted_score >= 40:
+        elif report.score >= 40:
             recs.append("[ACTION] Significant gaps detected. Review and enhance verification strategy.")
         else:
             recs.append("[ACTION] Verification flow needs major improvements. Consider redesigning test strategy.")
@@ -584,12 +602,14 @@ def generate_html_report(report: EvalReport, output_path: str):
         sev_bg = sev_colors.get(mr["severity"], "#6b7280")
         stat_bg = status_colors.get(mr["status"], "#6b7280")
         stat_icon = status_icons.get(mr["status"], "?")
+        pts = mr.get("points", 50)
         mutant_rows += f"""
         <tr>
             <td><code>{mr['mut_id']}</code></td>
+            <td style="text-align:center;font-size:12px;font-weight:bold;color:#94a3b8;">{pts}pts</td>
             <td><span style="background:{sev_bg};color:#fff;padding:2px 8px;border-radius:4px;font-size:12px;">{mr['severity']}</span></td>
             <td>{mr['category']}</td>
-            <td style="max-width:300px;font-size:13px;">{mr['description']}</td>
+            <td style="max-width:250px;font-size:13px;">{mr['description']}</td>
             <td style="text-align:center;">
                 <span style="background:{stat_bg};color:#fff;padding:2px 10px;border-radius:12px;font-weight:bold;">
                     {stat_icon} {mr['status']}
@@ -599,7 +619,7 @@ def generate_html_report(report: EvalReport, output_path: str):
             <td style="font-size:12px;">{mr['sim_duration_ms']:.0f}ms</td>
         </tr>"""
 
-    # Build operator leaderboard rows
+    # Build operator leaderboard rows — sorted by detection score (strongest first)
     op_rows = ""
     for rank, op in enumerate(sorted_ops, 1):
         # Assign tier to each operator
@@ -612,10 +632,14 @@ def generate_html_report(report: EvalReport, output_path: str):
                 break
 
         bar_width = min(100, op["score"])
+        pts_base = op.get("points", 50)
+        pts_earned = op.get("pts_earned", 0)
+        pts_possible = op.get("pts_possible", pts_base)
         op_rows += f"""
         <tr>
             <td style="text-align:center;font-weight:bold;color:#666;">{rank}</td>
             <td><code style="font-size:14px;font-weight:bold;">{op['operator']}</code></td>
+            <td style="font-size:12px;color:#94a3b8;">{pts_base} pts</td>
             <td>{op['killed']}/{op['total']}</td>
             <td>
                 <div style="display:flex;align-items:center;gap:8px;">
@@ -626,6 +650,7 @@ def generate_html_report(report: EvalReport, output_path: str):
                     </div>
                 </div>
             </td>
+            <td style="font-size:12px;color:#94a3b8;">{pts_earned}/{pts_possible}</td>
             <td style="text-align:center;">
                 <span style="display:inline-block;width:32px;height:32px;line-height:32px;text-align:center;
                     background:{op_color};color:#fff;border-radius:6px;font-weight:bold;font-size:16px;">{op_tier}</span>
@@ -825,8 +850,8 @@ def generate_html_report(report: EvalReport, output_path: str):
         <div class="tier-label">{report.tier_label}</div>
       </div>
       <div class="score-details">
-        <div class="big-score" style="color: {report.tier_color};">{report.weighted_score}%</div>
-        <div class="score-sub">Weighted Mutation Score (severity-adjusted)</div>
+        <div class="big-score" style="color: {report.tier_color};">{report.score}%</div>
+        <div class="score-sub">Points-Weighted Mutation Score (operator difficulty adjusted)</div>
         <div class="score-sub">Raw Score: {report.raw_score}% &bull; Eval Duration: {report.eval_duration_s}s &bull; Sim Time: {report.sim_total_time_ms:.0f}ms</div>
         <div class="score-grid">
           <div class="score-cell">
@@ -870,7 +895,7 @@ def generate_html_report(report: EvalReport, output_path: str):
     <h2>Operator Leaderboard <span style="font-size:14px;color:#94a3b8;font-weight:400;">(Strong to Weak)</span></h2>
     <table>
       <thead>
-        <tr><th style="width:60px;">#</th><th>Operator</th><th>Killed</th><th>Detection Rate</th><th style="width:60px;">Tier</th></tr>
+        <tr><th style="width:50px;">#</th><th>Operator</th><th>Difficulty</th><th>Killed</th><th>Detection Rate</th><th>Points Earned</th><th style="width:60px;">Tier</th></tr>
       </thead>
       <tbody>{op_rows}</tbody>
     </table>
@@ -882,7 +907,7 @@ def generate_html_report(report: EvalReport, output_path: str):
     <table>
       <thead>
         <tr>
-          <th>ID</th><th>Sev</th><th>Category</th><th>Description</th>
+          <th>ID</th><th style="text-align:center;">Pts</th><th>Sev</th><th>Category</th><th>Description</th>
           <th style="text-align:center;">Status</th><th>Kill Method</th><th>Time</th>
         </tr>
       </thead>
@@ -953,7 +978,7 @@ def generate_demo_report(output_dir: str):
         equivalent=1,
         error=1,
         raw_score=68.8,
-        weighted_score=62.3,
+        score=62.3,
         tier="B",
         tier_label="Acceptable",
         tier_color="#f59e0b",
@@ -972,24 +997,24 @@ def generate_demo_report(output_dir: str):
     ]
     report.category_scores = demo_cats
 
-    # Demo operator scores
+    # Demo operator scores (with points)
     demo_ops = [
-        {"operator": "SS-PARAM", "total": 1, "killed": 1, "alive": 0, "score": 100.0},
-        {"operator": "RB-RST", "total": 2, "killed": 2, "alive": 0, "score": 100.0},
-        {"operator": "RB-MASK", "total": 1, "killed": 1, "alive": 0, "score": 100.0},
-        {"operator": "RB-WE", "total": 1, "killed": 0, "alive": 1, "score": 0.0},
-        {"operator": "DP-OP", "total": 2, "killed": 2, "alive": 0, "score": 100.0},
-        {"operator": "DP-MUX", "total": 1, "killed": 0, "alive": 1, "score": 0.0},
-        {"operator": "DP-CONST", "total": 1, "killed": 1, "alive": 0, "score": 100.0},
-        {"operator": "IF-SEQ", "total": 1, "killed": 1, "alive": 0, "score": 100.0},
-        {"operator": "IF-PROT", "total": 1, "killed": 0, "alive": 1, "score": 0.0},
-        {"operator": "IF-IDLE", "total": 1, "killed": 1, "alive": 0, "score": 100.0},
-        {"operator": "IRQ-POL", "total": 1, "killed": 0, "alive": 1, "score": 0.0},
-        {"operator": "IRQ-MASK", "total": 1, "killed": 0, "alive": 1, "score": 0.0},
-        {"operator": "FSM-ARC", "total": 1, "killed": 1, "alive": 0, "score": 100.0},
-        {"operator": "FSM-DEF", "total": 1, "killed": 0, "alive": 0, "score": 0.0},
-        {"operator": "FSM-RST", "total": 1, "killed": 0, "alive": 1, "score": 0.0},
-        {"operator": "RB-ACC", "total": 1, "killed": 1, "alive": 0, "score": 100.0},
+        {"operator": "SS-PARAM", "total": 1, "killed": 1, "alive": 0, "score": 100.0, "points": 80, "pts_earned": 80, "pts_possible": 80},
+        {"operator": "RB-RST", "total": 2, "killed": 2, "alive": 0, "score": 100.0, "points": 78, "pts_earned": 156, "pts_possible": 156},
+        {"operator": "RB-MASK", "total": 1, "killed": 1, "alive": 0, "score": 100.0, "points": 68, "pts_earned": 68, "pts_possible": 68},
+        {"operator": "DP-OP", "total": 2, "killed": 2, "alive": 0, "score": 100.0, "points": 75, "pts_earned": 150, "pts_possible": 150},
+        {"operator": "DP-CONST", "total": 1, "killed": 1, "alive": 0, "score": 100.0, "points": 42, "pts_earned": 42, "pts_possible": 42},
+        {"operator": "IF-SEQ", "total": 1, "killed": 1, "alive": 0, "score": 100.0, "points": 88, "pts_earned": 88, "pts_possible": 88},
+        {"operator": "IF-IDLE", "total": 1, "killed": 1, "alive": 0, "score": 100.0, "points": 45, "pts_earned": 45, "pts_possible": 45},
+        {"operator": "FSM-ARC", "total": 1, "killed": 1, "alive": 0, "score": 100.0, "points": 72, "pts_earned": 72, "pts_possible": 72},
+        {"operator": "RB-ACC", "total": 1, "killed": 1, "alive": 0, "score": 100.0, "points": 58, "pts_earned": 58, "pts_possible": 58},
+        {"operator": "RB-WE", "total": 1, "killed": 0, "alive": 1, "score": 0.0, "points": 100, "pts_earned": 0, "pts_possible": 100},
+        {"operator": "DP-MUX", "total": 1, "killed": 0, "alive": 1, "score": 0.0, "points": 55, "pts_earned": 0, "pts_possible": 55},
+        {"operator": "IF-PROT", "total": 1, "killed": 0, "alive": 1, "score": 0.0, "points": 70, "pts_earned": 0, "pts_possible": 70},
+        {"operator": "IRQ-POL", "total": 1, "killed": 0, "alive": 1, "score": 0.0, "points": 85, "pts_earned": 0, "pts_possible": 85},
+        {"operator": "IRQ-MASK", "total": 1, "killed": 0, "alive": 1, "score": 0.0, "points": 76, "pts_earned": 0, "pts_possible": 76},
+        {"operator": "FSM-RST", "total": 1, "killed": 0, "alive": 1, "score": 0.0, "points": 92, "pts_earned": 0, "pts_possible": 92},
+        {"operator": "FSM-DEF", "total": 1, "killed": 0, "alive": 0, "score": 0.0, "points": 48, "pts_earned": 0, "pts_possible": 0},
     ]
     report.operator_scores = sorted(demo_ops, key=lambda x: x["score"], reverse=True)
 
@@ -1008,24 +1033,24 @@ def generate_demo_report(output_dir: str):
 
     # Demo mutant results
     demo_mutants = [
-        {"mut_id": "RB-RST_0015", "operator": "RB-RST", "category": "reg_bank", "severity": "high",
-         "description": "Reset value changed: 8'hA0 → 8'hA1", "status": "killed", "kill_method": "compile_error",
+        {"mut_id": "RB-RST_0015", "operator": "RB-RST", "category": "reg_bank", "severity": "high", "points": 78,
+         "description": "Reset value changed: 8'hA0 -> 8'hA1", "status": "killed", "kill_method": "compile_error",
          "original_text": "ctrl_q <= 8'hA0;", "mutated_text": "ctrl_q <= 8'hA1;",
          "sim_exit_code": 1, "sim_stderr": "", "sim_duration_ms": 120, "notes": ""},
-        {"mut_id": "RB-WE_0028", "operator": "RB-WE", "category": "reg_bank", "severity": "critical",
-         "description": "Write-enable inverted: pwrite → !pwrite", "status": "alive", "kill_method": "survived",
+        {"mut_id": "RB-WE_0028", "operator": "RB-WE", "category": "reg_bank", "severity": "critical", "points": 100,
+         "description": "Write-enable inverted: pwrite -> !pwrite", "status": "alive", "kill_method": "survived",
          "original_text": "if (psel && pwrite)", "mutated_text": "if (psel && !pwrite)",
          "sim_exit_code": 0, "sim_stderr": "", "sim_duration_ms": 85, "notes": ""},
-        {"mut_id": "FSM-RST_0005", "operator": "FSM-RST", "category": "fsm", "severity": "critical",
-         "description": "Reset state changed: IDLE → ACTIVE", "status": "alive", "kill_method": "survived",
+        {"mut_id": "FSM-RST_0005", "operator": "FSM-RST", "category": "fsm", "severity": "critical", "points": 92,
+         "description": "Reset state changed: IDLE -> ACTIVE", "status": "alive", "kill_method": "survived",
          "original_text": "state <= IDLE;", "mutated_text": "state <= ACTIVE;",
          "sim_exit_code": 0, "sim_stderr": "", "sim_duration_ms": 90, "notes": ""},
-        {"mut_id": "DP-OP_0032", "operator": "DP-OP", "category": "datapath", "severity": "high",
-         "description": "Operator mutated: '+' → '-'", "status": "killed", "kill_method": "compile_error",
+        {"mut_id": "DP-OP_0032", "operator": "DP-OP", "category": "datapath", "severity": "high", "points": 75,
+         "description": "Operator mutated: '+' -> '-'", "status": "killed", "kill_method": "compile_error",
          "original_text": "data_out <= a + b;", "mutated_text": "data_out <= a - b;",
          "sim_exit_code": 1, "sim_stderr": "width mismatch", "sim_duration_ms": 95, "notes": ""},
-        {"mut_id": "IRQ-POL_0001", "operator": "IRQ-POL", "category": "irq", "severity": "high",
-         "description": "IRQ polarity inverted: status_q → ~status_q", "status": "alive", "kill_method": "survived",
+        {"mut_id": "IRQ-POL_0001", "operator": "IRQ-POL", "category": "irq", "severity": "high", "points": 85,
+         "description": "IRQ polarity inverted: status_q -> ~status_q", "status": "alive", "kill_method": "survived",
          "original_text": "irq_o <= status_q;", "mutated_text": "irq_o <= ~status_q;",
          "sim_exit_code": 0, "sim_stderr": "", "sim_duration_ms": 75, "notes": ""},
     ]
@@ -1094,7 +1119,7 @@ def main(argv=None):
         json.dump(asdict(report), f, indent=2, ensure_ascii=False, default=str)
 
     print(f"\n{'='*60}")
-    print(f"  Final Score: {report.weighted_score}% (Tier {report.tier} - {report.tier_label})")
+    print(f"  Final Score: {report.score}% (Tier {report.tier} - {report.tier_label})")
     print(f"  Killed: {report.killed}/{report.total_mutants}")
     print(f"  HTML:    {html_path}")
     print(f"  JSON:    {json_path}")

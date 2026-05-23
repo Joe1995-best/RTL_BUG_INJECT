@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RTL Mutation Testing - I2C Slave Model (Points-Weighted)</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0f172a; color: #e2e8f0; line-height: 1.6;
+  }
+  .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+
+  /* Header */
+  .header {
+    background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+    border: 1px solid #334155; border-radius: 16px; padding: 32px;
+    margin-bottom: 24px; text-align: center;
+  }
+  .header h1 { font-size: 28px; font-weight: 800; margin-bottom: 8px; }
+  .header .subtitle { color: #94a3b8; font-size: 14px; }
+
+  /* Main Score */
+  .main-score {
+    display: flex; align-items: center; justify-content: center;
+    gap: 48px; margin: 32px 0;
+  }
+  .tier-circle {
+    width: 180px; height: 180px; border-radius: 50%;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    border: 4px solid; font-size: 64px; font-weight: 900;
+    background: rgba(0,0,0,0.3);
+    box-shadow: 0 0 40px rgba(0,0,0,0.3);
+  }
+  .tier-label { font-size: 16px; font-weight: 600; margin-top: 4px; }
+  .score-details { text-align: left; }
+  .score-details .big-score { font-size: 48px; font-weight: 900; }
+  .score-details .score-sub { color: #94a3b8; font-size: 14px; margin-top: 4px; }
+  .score-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+    margin-top: 16px;
+  }
+  .score-cell {
+    background: rgba(255,255,255,0.05); border-radius: 8px; padding: 12px; text-align: center;
+  }
+  .score-cell .num { font-size: 24px; font-weight: 800; }
+  .score-cell .lbl { font-size: 12px; color: #94a3b8; }
+
+  /* Tier Legend */
+  .tier-legend {
+    display: flex; gap: 12px; justify-content: center; margin: 16px 0; flex-wrap: wrap;
+  }
+  .tier-badge {
+    display: inline-block; padding: 4px 16px; border-radius: 20px;
+    font-weight: 700; font-size: 14px; color: #fff;
+  }
+
+  /* Sections */
+  .section {
+    background: #1e293b; border: 1px solid #334155; border-radius: 16px;
+    padding: 24px; margin-bottom: 24px;
+  }
+  .section h2 {
+    font-size: 20px; font-weight: 700; margin-bottom: 16px;
+    padding-bottom: 12px; border-bottom: 1px solid #334155;
+  }
+
+  /* Category Cards */
+  .cat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
+  .cat-card {
+    background: rgba(255,255,255,0.03); border-radius: 12px; padding: 20px; text-align: center;
+  }
+  .cat-card h3 { font-size: 14px; color: #94a3b8; font-weight: 600; margin-bottom: 12px; }
+
+  /* Score Ring (SVG) */
+  .score-ring { margin: 8px auto; }
+
+  .cat-stats { display: flex; gap: 12px; justify-content: center; margin-top: 12px; font-size: 13px; }
+  .cat-stats .killed { color: #10b981; font-weight: 700; }
+  .cat-stats .alive { color: #ef4444; font-weight: 700; }
+  .cat-stats .equiv { color: #6b7280; }
+  .cat-stats .total { color: #64748b; }
+
+  /* Leaderboard Table */
+  table {
+    width: 100%; border-collapse: collapse; font-size: 14px;
+  }
+  th {
+    text-align: left; padding: 10px 12px; font-weight: 600;
+    color: #94a3b8; border-bottom: 2px solid #334155; font-size: 12px;
+    text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  td { padding: 10px 12px; border-bottom: 1px solid #1e293b; }
+  tr:hover { background: rgba(255,255,255,0.03); }
+
+  /* Severity & Status colors */
+  .killed { color: #10b981; }
+  .alive { color: #ef4444; }
+  .equiv { color: #6b7280; }
+
+  /* Responsive */
+  @media (max-width: 768px) {
+    .main-score { flex-direction: column; gap: 24px; }
+    .score-grid { grid-template-columns: repeat(2, 1fr); }
+    .cat-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <!-- Header -->
+  <div class="header">
+    <h1>RTL Mutation Testing Report</h1>
+    <div class="subtitle">I2C Slave Model (Points-Weighted) &mdash; Generated 2026-05-23 12:49:56</div>
+  </div>
+
+  <!-- Main Score -->
+  <div class="section">
+    <div class="main-score">
+      <div class="tier-circle" style="border-color: #10b981; color: #10b981;">
+        S
+        <div class="tier-label">Excellent</div>
+      </div>
+      <div class="score-details">
+        <div class="big-score" style="color: #10b981;">100.0%</div>
+        <div class="score-sub">Points-Weighted Mutation Score (operator difficulty adjusted)</div>
+        <div class="score-sub">Raw Score: 100.0% &bull; Eval Duration: 1.1s &bull; Sim Time: 1114ms</div>
+        <div class="score-grid">
+          <div class="score-cell">
+            <div class="num" style="color:#10b981;">8</div>
+            <div class="lbl">Killed (X)</div>
+          </div>
+          <div class="score-cell">
+            <div class="num" style="color:#ef4444;">0</div>
+            <div class="lbl">Alive (O)</div>
+          </div>
+          <div class="score-cell">
+            <div class="num" style="color:#6b7280;">0</div>
+            <div class="lbl">Equivalent (=)</div>
+          </div>
+          <div class="score-cell">
+            <div class="num" style="color:#94a3b8;">8</div>
+            <div class="lbl">Total</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tier Legend -->
+    <div class="tier-legend">
+      <span class="tier-badge" style="background:#10b981;">S (90-100%) Excellent</span> <span class="tier-badge" style="background:#3b82f6;">A (75-89%) Good</span> <span class="tier-badge" style="background:#f59e0b;">B (60-74%) Acceptable</span> <span class="tier-badge" style="background:#f97316;">C (40-59%) Weak</span> <span class="tier-badge" style="background:#ef4444;">D (0-39%) Poor</span>
+    </div>
+
+    <!-- Severity Breakdown -->
+    <h3 style="margin: 24px 0 16px; font-size: 16px;">Severity Breakdown</h3>
+    
+        <div style="margin-bottom:12px;">
+            <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+                <span style="font-weight:600;color:#ea580c;">HIGH</span>
+                <span>7/7 killed (100.0%)</span>
+            </div>
+            <div style="background:#f1f5f9;border-radius:4px;height:20px;overflow:hidden;">
+                <div style="width:100.0%;background:#ea580c;height:100%;border-radius:4px;transition:width 0.8s;"></div>
+            </div>
+        </div>
+        <div style="margin-bottom:12px;">
+            <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+                <span style="font-weight:600;color:#d97706;">MEDIUM</span>
+                <span>1/1 killed (100.0%)</span>
+            </div>
+            <div style="background:#f1f5f9;border-radius:4px;height:20px;overflow:hidden;">
+                <div style="width:100.0%;background:#d97706;height:100%;border-radius:4px;transition:width 0.8s;"></div>
+            </div>
+        </div>
+  </div>
+
+  <!-- Category Scores -->
+  <div class="section">
+    <h2>Category Detection Rates</h2>
+    <div class="cat-grid">
+        <div class="cat-card" style="border-top:4px solid #10b981;">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+                <h3>Register Bank</h3>
+                <span class="tier-badge" style="background:#10b981;">S</span>
+            </div>
+            <div class="score-ring" data-score="100.0" data-color="#10b981"></div>
+            <div class="cat-stats">
+                <span class="killed">X 5</span>
+                <span class="alive">O 0</span>
+                <span class="equiv">= 0</span>
+                <span class="total">5 total</span>
+            </div>
+        </div>
+        <div class="cat-card" style="border-top:4px solid #10b981;">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+                <h3>FSM</h3>
+                <span class="tier-badge" style="background:#10b981;">S</span>
+            </div>
+            <div class="score-ring" data-score="100.0" data-color="#10b981"></div>
+            <div class="cat-stats">
+                <span class="killed">X 1</span>
+                <span class="alive">O 0</span>
+                <span class="equiv">= 0</span>
+                <span class="total">1 total</span>
+            </div>
+        </div>
+        <div class="cat-card" style="border-top:4px solid #10b981;">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+                <h3>Datapath</h3>
+                <span class="tier-badge" style="background:#10b981;">S</span>
+            </div>
+            <div class="score-ring" data-score="100.0" data-color="#10b981"></div>
+            <div class="cat-stats">
+                <span class="killed">X 2</span>
+                <span class="alive">O 0</span>
+                <span class="equiv">= 0</span>
+                <span class="total">2 total</span>
+            </div>
+        </div></div>
+  </div>
+
+  <!-- Operator Leaderboard (from strong to weak) -->
+  <div class="section">
+    <h2>Operator Leaderboard <span style="font-size:14px;color:#94a3b8;font-weight:400;">(Strong to Weak)</span></h2>
+    <table>
+      <thead>
+        <tr><th style="width:50px;">#</th><th>Operator</th><th>Difficulty</th><th>Killed</th><th>Detection Rate</th><th>Points Earned</th><th style="width:60px;">Tier</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+            <td style="text-align:center;font-weight:bold;color:#666;">1</td>
+            <td><code style="font-size:14px;font-weight:bold;">DP-MUX</code></td>
+            <td style="font-size:12px;color:#94a3b8;">55 pts</td>
+            <td>1/1</td>
+            <td>
+                <div style="display:flex;align-items:center;gap:8px;">
+                    <div style="flex:1;background:#f1f5f9;border-radius:4px;height:24px;overflow:hidden;">
+                        <div style="width:100%;background:#10b981;height:100%;border-radius:4px;display:flex;align-items:center;justify-content:flex-end;padding-right:6px;">
+                            <span style="color:#fff;font-size:12px;font-weight:bold;">100.0%</span>
+                        </div>
+                    </div>
+                </div>
+            </td>
+            <td style="font-size:12px;color:#94a3b8;">55/55</td>
+            <td style="text-align:center;">
+                <span style="display:inline-block;width:32px;height:32px;line-height:32px;text-align:center;
+                    background:#10b981;color:#fff;border-radius:6px;font-weight:bold;font-size:16px;">S</span>
+            </td>
+        </tr>
+        <tr>
+            <td style="text-align:center;font-weight:bold;color:#666;">2</td>
+            <td><code style="font-size:14px;font-weight:bold;">DP-OP</code></td>
+            <td style="font-size:12px;color:#94a3b8;">75 pts</td>
+            <td>1/1</td>
+            <td>
+                <div style="display:flex;align-items:center;gap:8px;">
+                    <div style="flex:1;background:#f1f5f9;border-radius:4px;height:24px;overflow:hidden;">
+                        <div style="width:100%;background:#10b981;height:100%;border-radius:4px;display:flex;align-items:center;justify-content:flex-end;padding-right:6px;">
+                            <span style="color:#fff;font-size:12px;font-weight:bold;">100.0%</span>
+                        </div>
+                    </div>
+                </div>
+            </td>
+            <td style="font-size:12px;color:#94a3b8;">75/75</td>
+            <td style="text-align:center;">
+                <span style="display:inline-block;width:32px;height:32px;line-height:32px;text-align:center;
+                    background:#10b981;color:#fff;border-radius:6px;font-weight:bold;font-size:16px;">S</span>
+            </td>
+        </tr>
+        <tr>
+            <td style="text-align:center;font-weight:bold;color:#666;">3</td>
+            <td><code style="font-size:14px;font-weight:bold;">FSM-DEF</code></td>
+            <td style="font-size:12px;color:#94a3b8;">48 pts</td>
+            <td>1/1</td>
+            <td>
+                <div style="display:flex;align-items:center;gap:8px;">
+                    <div style="flex:1;background:#f1f5f9;border-radius:4px;height:24px;overflow:hidden;">
+                        <div style="width:100%;background:#10b981;height:100%;border-radius:4px;display:flex;align-items:center;justify-content:flex-end;padding-right:6px;">
+                            <span style="color:#fff;font-size:12px;font-weight:bold;">100.0%</span>
+                        </div>
+                    </div>
+                </div>
+            </td>
+            <td style="font-size:12px;color:#94a3b8;">48/48</td>
+            <td style="text-align:center;">
+                <span style="display:inline-block;width:32px;height:32px;line-height:32px;text-align:center;
+                    background:#10b981;color:#fff;border-radius:6px;font-weight:bold;font-size:16px;">S</span>
+            </td>
+        </tr>
+        <tr>
+            <td style="text-align:center;font-weight:bold;color:#666;">4</td>
+            <td><code style="font-size:14px;font-weight:bold;">RB-RST</code></td>
+            <td style="font-size:12px;color:#94a3b8;">78 pts</td>
+            <td>5/5</td>
+            <td>
+                <div style="display:flex;align-items:center;gap:8px;">
+                    <div style="flex:1;background:#f1f5f9;border-radius:4px;height:24px;overflow:hidden;">
+                        <div style="width:100%;background:#10b981;height:100%;border-radius:4px;display:flex;align-items:center;justify-content:flex-end;padding-right:6px;">
+                            <span style="color:#fff;font-size:12px;font-weight:bold;">100.0%</span>
+                        </div>
+                    </div>
+                </div>
+            </td>
+            <td style="font-size:12px;color:#94a3b8;">390/390</td>
+            <td style="text-align:center;">
+                <span style="display:inline-block;width:32px;height:32px;line-height:32px;text-align:center;
+                    background:#10b981;color:#fff;border-radius:6px;font-weight:bold;font-size:16px;">S</span>
+            </td>
+        </tr></tbody>
+    </table>
+  </div>
+
+  <!-- Mutant Detail Table -->
+  <div class="section">
+    <h2>Mutant Detail <span style="font-size:14px;color:#94a3b8;font-weight:400;">(8 mutants)</span></h2>
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th><th style="text-align:center;">Pts</th><th>Sev</th><th>Category</th><th>Description</th>
+          <th style="text-align:center;">Status</th><th>Kill Method</th><th>Time</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+            <td><code>RB-RST_0218</code></td>
+            <td style="text-align:center;font-size:12px;font-weight:bold;color:#94a3b8;">78pts</td>
+            <td><span style="background:#ea580c;color:#fff;padding:2px 8px;border-radius:4px;font-size:12px;">high</span></td>
+            <td>reg_bank</td>
+            <td style="max-width:250px;font-size:13px;">Reset value changed: 8'hFF → 8'hFE</td>
+            <td style="text-align:center;">
+                <span style="background:#10b981;color:#fff;padding:2px 10px;border-radius:12px;font-weight:bold;">
+                    X killed
+                </span>
+            </td>
+            <td style="font-size:12px;color:#888;">compile_error</td>
+            <td style="font-size:12px;">165ms</td>
+        </tr>
+        <tr>
+            <td><code>RB-RST_0219</code></td>
+            <td style="text-align:center;font-size:12px;font-weight:bold;color:#94a3b8;">78pts</td>
+            <td><span style="background:#ea580c;color:#fff;padding:2px 8px;border-radius:4px;font-size:12px;">high</span></td>
+            <td>reg_bank</td>
+            <td style="max-width:250px;font-size:13px;">Reset value changed: 8'h5A → 8'h5B</td>
+            <td style="text-align:center;">
+                <span style="background:#10b981;color:#fff;padding:2px 10px;border-radius:12px;font-weight:bold;">
+                    X killed
+                </span>
+            </td>
+            <td style="font-size:12px;color:#888;">compile_error</td>
+            <td style="font-size:12px;">135ms</td>
+        </tr>
+        <tr>
+            <td><code>RB-RST_0220</code></td>
+            <td style="text-align:center;font-size:12px;font-weight:bold;color:#94a3b8;">78pts</td>
+            <td><span style="background:#ea580c;color:#fff;padding:2px 8px;border-radius:4px;font-size:12px;">high</span></td>
+            <td>reg_bank</td>
+            <td style="max-width:250px;font-size:13px;">Reset value changed: 8'hA5 → 8'hA4</td>
+            <td style="text-align:center;">
+                <span style="background:#10b981;color:#fff;padding:2px 10px;border-radius:12px;font-weight:bold;">
+                    X killed
+                </span>
+            </td>
+            <td style="font-size:12px;color:#888;">compile_error</td>
+            <td style="font-size:12px;">125ms</td>
+        </tr>
+        <tr>
+            <td><code>RB-RST_0221</code></td>
+            <td style="text-align:center;font-size:12px;font-weight:bold;color:#94a3b8;">78pts</td>
+            <td><span style="background:#ea580c;color:#fff;padding:2px 8px;border-radius:4px;font-size:12px;">high</span></td>
+            <td>reg_bank</td>
+            <td style="max-width:250px;font-size:13px;">Reset value changed: 8'h00 → 8'h01</td>
+            <td style="text-align:center;">
+                <span style="background:#10b981;color:#fff;padding:2px 10px;border-radius:12px;font-weight:bold;">
+                    X killed
+                </span>
+            </td>
+            <td style="font-size:12px;color:#888;">compile_error</td>
+            <td style="font-size:12px;">174ms</td>
+        </tr>
+        <tr>
+            <td><code>RB-RST_0222</code></td>
+            <td style="text-align:center;font-size:12px;font-weight:bold;color:#94a3b8;">78pts</td>
+            <td><span style="background:#ea580c;color:#fff;padding:2px 8px;border-radius:4px;font-size:12px;">high</span></td>
+            <td>reg_bank</td>
+            <td style="max-width:250px;font-size:13px;">Reset value changed: 8'hDE → 8'hDF</td>
+            <td style="text-align:center;">
+                <span style="background:#10b981;color:#fff;padding:2px 10px;border-radius:12px;font-weight:bold;">
+                    X killed
+                </span>
+            </td>
+            <td style="font-size:12px;color:#888;">compile_error</td>
+            <td style="font-size:12px;">130ms</td>
+        </tr>
+        <tr>
+            <td><code>FSM-DEF_0226</code></td>
+            <td style="text-align:center;font-size:12px;font-weight:bold;color:#94a3b8;">48pts</td>
+            <td><span style="background:#d97706;color:#fff;padding:2px 8px;border-radius:4px;font-size:12px;">medium</span></td>
+            <td>fsm</td>
+            <td style="max-width:250px;font-size:13px;">Default case removed from state machine (X-propagation risk)</td>
+            <td style="text-align:center;">
+                <span style="background:#10b981;color:#fff;padding:2px 10px;border-radius:12px;font-weight:bold;">
+                    X killed
+                </span>
+            </td>
+            <td style="font-size:12px;color:#888;">compile_error</td>
+            <td style="font-size:12px;">129ms</td>
+        </tr>
+        <tr>
+            <td><code>DP-OP_0108</code></td>
+            <td style="text-align:center;font-size:12px;font-weight:bold;color:#94a3b8;">75pts</td>
+            <td><span style="background:#ea580c;color:#fff;padding:2px 8px;border-radius:4px;font-size:12px;">high</span></td>
+            <td>datapath</td>
+            <td style="max-width:250px;font-size:13px;">Operator mutated: '+' → '-' on line 109</td>
+            <td style="text-align:center;">
+                <span style="background:#10b981;color:#fff;padding:2px 10px;border-radius:12px;font-weight:bold;">
+                    X killed
+                </span>
+            </td>
+            <td style="font-size:12px;color:#888;">compile_error</td>
+            <td style="font-size:12px;">130ms</td>
+        </tr>
+        <tr>
+            <td><code>DP-MUX_0069</code></td>
+            <td style="text-align:center;font-size:12px;font-weight:bold;color:#94a3b8;">55pts</td>
+            <td><span style="background:#ea580c;color:#fff;padding:2px 8px;border-radius:4px;font-size:12px;">high</span></td>
+            <td>datapath</td>
+            <td style="max-width:250px;font-size:13px;">Mux branches swapped: 'sda_drive_q' ↔ '1'bz'</td>
+            <td style="text-align:center;">
+                <span style="background:#10b981;color:#fff;padding:2px 10px;border-radius:12px;font-weight:bold;">
+                    X killed
+                </span>
+            </td>
+            <td style="font-size:12px;color:#888;">compile_error</td>
+            <td style="font-size:12px;">126ms</td>
+        </tr></tbody>
+    </table>
+  </div>
+
+  <!-- Recommendations -->
+  <div class="section">
+    <h2>Recommendations</h2>
+    
+        <div style="background:#f0fdf4;border-left:4px solid #10b981;padding:12px 16px;border-radius:0 8px 8px 0;margin-bottom:8px;font-size:14px;">
+            [OK] Verification flow is robust. Maintain current test quality.
+        </div>
+  </div>
+
+  <!-- Footer -->
+  <div style="text-align:center;color:#475569;font-size:12px;padding:16px;">
+    RTL Mutation Testing Engine &bull; digital-verify-pro &bull; 2026-05-23 12:49:56
+  </div>
+
+</div>
+
+<script>
+// Animate score rings
+document.querySelectorAll('.score-ring').forEach(el => {
+    const score = parseFloat(el.dataset.score);
+    const color = el.dataset.color;
+    const r = 40;
+    const circ = 2 * Math.PI * r;
+    const offset = circ - (score / 100) * circ;
+
+    el.innerHTML = `
+      <svg width="100" height="100" viewBox="0 0 100 100">
+        <circle cx="50" cy="50" r="${r}" fill="none" stroke="#334155" stroke-width="8"/>
+        <circle cx="50" cy="50" r="${r}" fill="none" stroke="${color}" stroke-width="8"
+          stroke-dasharray="${circ}" stroke-dashoffset="${offset}"
+          stroke-linecap="round" transform="rotate(-90 50 50)"
+          style="transition: stroke-dashoffset 1.2s ease-out;"/>
+        <text x="50" y="54" text-anchor="middle" fill="${color}"
+          font-size="22" font-weight="800">${score}%</text>
+      </svg>`;
+});
+</script>
+
+</body>
+</html>

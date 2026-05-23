@@ -162,18 +162,62 @@ class MutantFile:
 
 _OPERATORS: Dict[str, Dict[str, Any]] = {}
 
-def _op(name: str, category: MutCategory, level: MutLevel,
-        description: str, kill_hint: str, severity: str = "medium"):
-    """Decorator to register a mutation operator."""
-    def decorator(fn: Callable):
+POINTS = {
+    # --- reg_bank ---
+    "RB-WE":   100,   # 写使能反了 — 所有写失效，最难检测
+    "RB-ADDR": 95,    # 地址偏移 4B — 编译通过，功能错，难抓
+    "RB-RST":  78,    # 复位值错 — 读复位值可抓，中等
+    "RB-MASK": 68,    # 字段掩码偏 — 需写相邻字段验证
+    "RB-ACC":  58,    # 访问类型错 — 写 RO 再读可抓
+
+    # --- fsm ---
+    "FSM-RST": 92,    # 复位状态错 — 上电 corner case
+    "FSM-ARC": 72,    # 转移目标错 — 需覆盖特定转移
+    "FSM-DEF": 48,    # default 缺失 — assertion 易抓
+
+    # --- datapath ---
+    "DP-OP":   75,    # 运算符替换 — 需定向算术测试
+    "DP-MUX":  55,    # mux 分支反 — 需覆盖两分支
+    "DP-CONST": 42,    # 常量±1 — 影响小，易漏检
+
+    # --- interface ---
+    "IF-SEQ":  88,    # APB 时序错 — 需 protocol checker
+    "IF-PROT": 70,    # PSLVERR 不报 — 需错误访问测试
+    "IF-IDLE": 45,    # 空闲信号不拉低 — 功能影响小
+
+    # --- irq ---
+    "IRQ-POL":  85,    # 中断极性反 — 系统级 bug，UVM 难抓
+    "IRQ-MASK": 76,    # 中断屏蔽反 — 部分中断丢失
+    "IRQ-PEND": 62,    # pending 不清除 — 中断重复触发
+
+    # --- subsystem ---
+    "SS-CONN":  98,    # 端口接错 — 功能完全错，端到端才抓得到
+    "SS-BASE":  94,    # 基地址错 — 整个模块访问不到
+    "SS-PARAM": 80,    # 参数传错 — 功能异常但隐蔽
+}
+
+def _op(name, category, level,
+        description, kill_hint, severity="medium", points=None):
+    """
+    Decorator to register a mutation operator.
+
+    Args:
+        points: Detection difficulty score (0–100).
+                Higher = harder to detect (more penalty if alive).
+                If None, auto-derive from POINTS dict (must be pre-defined).
+    """
+    if points is None:
+        points = POINTS.get(name, 50)  # default 50 if missing
+    def decorator(fn):
         _OPERATORS[name] = {
-            "fn": fn,
-            "name": name,
-            "category": category,
-            "level": level,
+            "fn":         fn,
+            "name":       name,
+            "category":   category,
+            "level":      level,
             "description": description,
-            "kill_hint": kill_hint,
-            "severity": severity,
+            "kill_hint":  kill_hint,
+            "severity":   severity,
+            "points":     points,   # <-- 新增：检测难度分值
         }
         return fn
     return decorator
@@ -1128,12 +1172,12 @@ class RTLMutator:
 # ---------------------------------------------------------------------------
 
 def _list_operators():
-    print(f"\n{'Operator':<12} {'Category':<12} {'Level':<12} {'Sev':<10} Description")
-    print("-" * 90)
-    for name, info in sorted(_OPERATORS.items()):
-        print(f"  {name:<12} {info['category'].value:<12} {info['level'].value:<12} "
+    print(f"\n{'Operator':<12} {'Points':>6} {'Category':<12} {'Sev':<10} Description")
+    print("-" * 96)
+    for name, info in sorted(_OPERATORS.items(), key=lambda x: -x[1].get("points", 0)):
+        print(f"  {name:<12} {info.get('points',50):>6} {info['category'].value:<12} "
               f"{info['severity']:<10} {info['description']}")
-    print(f"\nTotal: {len(_OPERATORS)} operators\n")
+    print(f"\nTotal: {len(_OPERATORS)} operators  (sorted by difficulty score, high→low)\n")
 
 
 def main(argv: Optional[List[str]] = None) -> int:
